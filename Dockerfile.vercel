@@ -1,65 +1,26 @@
-# ============================================================
-# Stage 1: Build frontend (komari-web)
-# ============================================================
-FROM node:23-alpine AS frontend
-WORKDIR /build
-RUN apk add --no-cache git
-RUN git clone --depth 1 https://github.com/komari-monitor/komari-web.git .
-RUN npm ci
-RUN npm run build
-
-# ============================================================
-# Stage 2: Build Go binary (CGO required for SQLite)
-# ============================================================
-FROM golang:1.25-alpine AS builder
-RUN apk add --no-cache gcc musl-dev
-WORKDIR /src
-
-# Copy Go source
-COPY . .
-
-# Copy frontend static files into embed directory
-COPY --from=frontend /build/dist /src/web/public/defaultTheme/dist/
-COPY --from=frontend /build/komari-theme.json /src/web/public/defaultTheme/
-# preview images (glob won't fail if file missing)
-COPY --from=frontend /build/preview*.png /src/web/public/defaultTheme/
-# Compatibility: some versions use "perview.png" (typo)
-RUN if [ -f /src/web/public/defaultTheme/preview.png ] && [ ! -f /src/web/public/defaultTheme/perview.png ]; then \
-      cp /src/web/public/defaultTheme/preview.png /src/web/public/defaultTheme/perview.png; \
-    elif [ -f /src/web/public/defaultTheme/perview.png ] && [ ! -f /src/web/public/defaultTheme/preview.png ]; then \
-      cp /src/web/public/defaultTheme/perview.png /src/web/public/defaultTheme/preview.png; \
-    fi
-
-# Build static binary (CGO enabled for SQLite, linked against musl)
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" -o komari-linux-amd64
-
-# ============================================================
-# Stage 3: Minimal runtime image
-# ============================================================
 FROM alpine:3.21
+
 WORKDIR /app
 
+# Docker buildx 会在构建时自动填充这些变量
 ARG TARGETOS
 ARG TARGETARCH
 
 RUN apk add --no-cache ca-certificates curl tzdata
 
-# Download cloudflared
 RUN set -eux; \
     case "${TARGETARCH}" in \
-      amd64) cf_arch="amd64" ;; \
-      386) cf_arch="386" ;; \
-      arm64) cf_arch="arm64" ;; \
-      arm) cf_arch="arm" ;; \
+      amd64) cloudflared_arch="amd64" ;; \
+      386) cloudflared_arch="386" ;; \
+      arm64) cloudflared_arch="arm64" ;; \
+      arm) cloudflared_arch="arm" ;; \
       *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}" \
-      -o /usr/local/bin/cloudflared; \
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cloudflared_arch}" -o /usr/local/bin/cloudflared; \
     chmod +x /usr/local/bin/cloudflared
 
-# Copy compiled Go binary from builder stage
-COPY --from=builder /src/komari-linux-amd64 /app/komari
+COPY komari-${TARGETOS}-${TARGETARCH} /app/komari
+
 RUN chmod +x /app/komari
 
 ENV GIN_MODE=release
